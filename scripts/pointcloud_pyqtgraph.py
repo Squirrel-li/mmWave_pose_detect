@@ -54,62 +54,27 @@ def add_gl_text(view, gl, qt_gui, pos, text: str, color, size: int = 10):
     return item
 
 
-def add_axis_guides(view, gl, qt_gui, display_ranges) -> None:
-    (x_min, x_max), (y_min, y_max), (z_min, z_max) = display_ranges
-    x_ref = axis_reference((x_min, x_max))
-    y_ref = axis_reference((y_min, y_max))
-    z_ref = axis_reference((z_min, z_max))
+def add_floor_plane(view, gl, display_ranges) -> None:
+    (x_min, x_max), (y_min, y_max), (z_min, _z_max) = display_ranges
     x_span = range_span((x_min, x_max))
     y_span = range_span((y_min, y_max))
-    z_span = range_span((z_min, z_max))
-    tick_len = max(min(x_span, y_span, z_span) * 0.035, 0.04)
-    axis_width = 2.5
-    tick_width = 1.6
-    box_color = (0.55, 0.55, 0.55, 0.45)
-    tick_color = (0.9, 0.9, 0.9, 0.9)
-    x_color = (1.0, 0.25, 0.25, 1.0)
-    y_color = (0.25, 1.0, 0.35, 1.0)
-    z_color = (0.3, 0.55, 1.0, 1.0)
+    x_center = range_center((x_min, x_max))
+    y_center = range_center((y_min, y_max))
 
-    corners = [
+    grid = gl.GLGridItem()
+    grid.setSize(x=x_span, y=y_span)
+    grid.setSpacing(x=max(x_span / 8.0, 0.25), y=max(y_span / 8.0, 0.25))
+    grid.translate(x_center, y_center, z_min)
+    view.addItem(grid)
+
+    border_color = (0.8, 0.8, 0.8, 0.28)
+    border = [
         (x_min, y_min, z_min), (x_max, y_min, z_min),
-        (x_min, y_max, z_min), (x_max, y_max, z_min),
-        (x_min, y_min, z_max), (x_max, y_min, z_max),
-        (x_min, y_max, z_max), (x_max, y_max, z_max),
+        (x_max, y_min, z_min), (x_max, y_max, z_min),
+        (x_max, y_max, z_min), (x_min, y_max, z_min),
+        (x_min, y_max, z_min), (x_min, y_min, z_min),
     ]
-    edges = [
-        (corners[0], corners[1]), (corners[2], corners[3]),
-        (corners[4], corners[5]), (corners[6], corners[7]),
-        (corners[0], corners[2]), (corners[1], corners[3]),
-        (corners[4], corners[6]), (corners[5], corners[7]),
-        (corners[0], corners[4]), (corners[1], corners[5]),
-        (corners[2], corners[6]), (corners[3], corners[7]),
-    ]
-    add_gl_line(view, gl, [point for edge in edges for point in edge], box_color, width=1.0)
-
-    add_gl_line(view, gl, [(x_min, y_ref, z_ref), (x_max, y_ref, z_ref)], x_color, width=axis_width)
-    add_gl_line(view, gl, [(x_ref, y_min, z_ref), (x_ref, y_max, z_ref)], y_color, width=axis_width)
-    add_gl_line(view, gl, [(x_ref, y_ref, z_min), (x_ref, y_ref, z_max)], z_color, width=axis_width)
-
-    tick_segments = []
-    for x in tick_values((x_min, x_max)):
-        tick_segments.extend([(x, y_ref - tick_len, z_ref), (x, y_ref + tick_len, z_ref)])
-    for y in tick_values((y_min, y_max)):
-        tick_segments.extend([(x_ref - tick_len, y, z_ref), (x_ref + tick_len, y, z_ref)])
-    for z in tick_values((z_min, z_max)):
-        tick_segments.extend([(x_ref - tick_len, y_ref, z), (x_ref + tick_len, y_ref, z)])
-    add_gl_line(view, gl, tick_segments, tick_color, width=tick_width)
-
-    for x in tick_values((x_min, x_max)):
-        add_gl_text(view, gl, qt_gui, (x, y_ref - tick_len * 4.0, z_ref - tick_len * 2.0), f'{x:g}', tick_color)
-    for y in tick_values((y_min, y_max)):
-        add_gl_text(view, gl, qt_gui, (x_ref - tick_len * 4.5, y, z_ref - tick_len * 2.0), f'{y:g}', tick_color)
-    for z in tick_values((z_min, z_max)):
-        add_gl_text(view, gl, qt_gui, (x_ref - tick_len * 5.0, y_ref - tick_len * 2.0, z), f'{z:g}', tick_color)
-
-    add_gl_text(view, gl, qt_gui, (x_max + x_span * 0.06, y_ref, z_ref), 'X horiz (m)', x_color, size=12)
-    add_gl_text(view, gl, qt_gui, (x_ref, y_max + y_span * 0.06, z_ref), 'Y depth (m)', y_color, size=12)
-    add_gl_text(view, gl, qt_gui, (x_ref, y_ref, z_max + z_span * 0.08), 'Z height (m)', z_color, size=12)
+    add_gl_line(view, gl, border, border_color, width=1.2)
 
 
 def init_plot(display_ranges, title: str = 'Realtime points 3D (pyqtgraph OpenGL)'):
@@ -140,13 +105,7 @@ def init_plot(display_ranges, title: str = 'Realtime points 3D (pyqtgraph OpenGL
     view.opts['center'].setY(y_center)
     view.opts['center'].setZ(z_center)
 
-    grid = gl.GLGridItem()
-    grid.setSize(x=x_span, y=y_span)
-    grid.setSpacing(x=max(x_span / 8.0, 0.25), y=max(y_span / 8.0, 0.25))
-    grid.translate(x_center, y_center, z_min)
-    view.addItem(grid)
-
-    add_axis_guides(view, gl, QtGui, display_ranges)
+    add_floor_plane(view, gl, display_ranges)
 
     scatter = gl.GLScatterPlotItem(
         pos=np.empty((0, 3), dtype=np.float32),

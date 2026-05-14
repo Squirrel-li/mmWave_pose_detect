@@ -51,6 +51,16 @@ class PointFilterSettings:
 	z_max: float = 1.0
 
 
+@dataclass(frozen=True)
+class PointTransformSettings:
+	height_normalize_enabled: bool = False
+	source_height_m: float = 1.90
+	target_height_m: float = 1.75
+	height_axes: tuple[str, ...] = ('x', 'z')
+	floor_z_m: float = -1.0
+	x_center_m: float = 0.0
+
+
 @dataclass
 class FrameData:
 	frame_number: int
@@ -101,6 +111,30 @@ def point_filter_settings_from_config(config: dict | None = None) -> PointFilter
 	)
 
 
+def point_transform_settings_from_config(config: dict | None = None) -> PointTransformSettings:
+	config = config or RADAR_CONFIG
+	raw_axes = cfg_get(config, 'point_transform', 'height_normalization', 'axes', default=['x', 'z'])
+	return PointTransformSettings(
+		height_normalize_enabled=bool(cfg_get(config, 'point_transform', 'height_normalization', 'enabled', default=False)),
+		source_height_m=float(cfg_get(config, 'point_transform', 'height_normalization', 'source_height_m', default=1.90)),
+		target_height_m=float(cfg_get(config, 'point_transform', 'height_normalization', 'target_height_m', default=1.75)),
+		height_axes=parse_transform_axes(raw_axes),
+		floor_z_m=float(cfg_get(config, 'point_transform', 'height_normalization', 'floor_z_m', default=-1.0)),
+		x_center_m=float(cfg_get(config, 'point_transform', 'height_normalization', 'x_center_m', default=0.0)),
+	)
+
+
+def parse_transform_axes(raw_axes) -> tuple[str, ...]:
+	if isinstance(raw_axes, str):
+		axes = tuple(axis.strip().lower() for axis in raw_axes.split(',') if axis.strip())
+	else:
+		axes = tuple(str(axis).strip().lower() for axis in raw_axes)
+	for axis in axes:
+		if axis not in ('x', 'y', 'z'):
+			raise ValueError(f'Unsupported transform axis: {axis}')
+	return axes
+
+
 def filter_points(points: np.ndarray, settings: PointFilterSettings) -> np.ndarray:
 	if points is None or points.shape[0] == 0:
 		return np.zeros((0, 5), dtype=np.float64)
@@ -111,18 +145,42 @@ def filter_points(points: np.ndarray, settings: PointFilterSettings) -> np.ndarr
 
 	if settings.roi_enabled and filtered.shape[0] > 0:
 		mask = (
-			(filtered[:, 0] > settings.x_min) & (filtered[:, 0] < settings.x_max) &
-			(filtered[:, 1] > settings.y_min) & (filtered[:, 1] < settings.y_max) &
-			(filtered[:, 2] > settings.z_min) & (filtered[:, 2] < settings.z_max)
+			(filtered[:, 0] >= settings.x_min) & (filtered[:, 0] <= settings.x_max) &
+			(filtered[:, 1] >= settings.y_min) & (filtered[:, 1] <= settings.y_max) &
+			(filtered[:, 2] >= settings.z_min) & (filtered[:, 2] <= settings.z_max)
 		)
 		filtered = filtered[mask]
 
 
-	if filtered.shape[0] > 0:
-		moving_mask = np.abs(filtered[:, 3]) >= 0.2870
-		filtered = filtered[moving_mask]
+	# if filtered.shape[0] > 0:
+	# 	moving_mask = np.abs(filtered[:, 3]) >= 0.2870
+	# 	filtered = filtered[moving_mask]
   
 	return filtered
+
+
+def transform_points(points: np.ndarray, settings: PointTransformSettings) -> np.ndarray:
+	if points is None or points.shape[0] == 0:
+		return np.zeros((0, 5), dtype=np.float64)
+
+	if not settings.height_normalize_enabled:
+		return points
+
+	if settings.source_height_m <= 0:
+		raise ValueError('source_height_m must be positive')
+
+	scale = settings.target_height_m / settings.source_height_m
+	transformed = points.copy()
+	for axis in settings.height_axes:
+		if axis == 'x':
+			transformed[:, 0] = settings.x_center_m + (transformed[:, 0] - settings.x_center_m) * scale
+		elif axis == 'z':
+			transformed[:, 2] = settings.floor_z_m + (transformed[:, 2] - settings.floor_z_m) * scale
+		elif axis == 'y':
+			transformed[:, 1] *= scale
+		else:
+			raise ValueError(f'Unsupported height normalization axis: {axis}')
+	return transformed
 
 
 def select_mars_points(points: np.ndarray, max_points: int = 64, truncate_before_sort: bool = True) -> np.ndarray:
@@ -141,6 +199,62 @@ def select_mars_points(points: np.ndarray, max_points: int = 64, truncate_before
 		selected = selected[:max_points]
 
 	return selected
+
+
+class MarsFeatureMapProcessor:
+	"""Shared MARS preprocessing: filter points, select/pad 64 points, reshape to (8, 8, 5)."""
+
+	def __init__(
+		self,
+		point_filter: PointFilterSettings,
+		point_transform: PointTransformSettings | None = None,
+		max_points: int = 64,
+		truncate_before_sort: bool = True,
+		dtype='float64',
+	):
+		self.point_filter = point_filter
+		self.point_transform = point_transform or PointTransformSettings()
+		self.max_points = int(max_points)
+		self.truncate_before_sort = bool(truncate_before_sort)
+		self.dtype = np.dtype(dtype)
+		self.feature_shape = (8, 8, 5)
+		self.required_points = self.feature_shape[0] * self.feature_shape[1]
+		if self.max_points != self.required_points:
+			raise ValueError(
+				f'MARS feature map requires max_points={self.required_points} '
+				f'for shape {self.feature_shape}, got {self.max_points}'
+			)
+
+	def filter(self, points: np.ndarray) -> np.ndarray:
+		return filter_points(points, self.point_filter)
+
+	def select(self, points: np.ndarray) -> np.ndarray:
+		return select_mars_points(
+			points,
+			max_points=self.max_points,
+			truncate_before_sort=self.truncate_before_sort,
+		)
+
+	def transform(self, points: np.ndarray) -> np.ndarray:
+		return transform_points(points, self.point_transform)
+
+	def points_to_featuremap(self, points: np.ndarray) -> np.ndarray:
+		if points is None or points.shape[0] == 0:
+			return np.zeros(self.feature_shape, dtype=self.dtype)
+
+		selected = self.select(points).astype(self.dtype, copy=False)
+		if selected.shape[0] < self.max_points:
+			pad = np.zeros((self.max_points - selected.shape[0], 5), dtype=self.dtype)
+			selected = np.vstack((selected, pad))
+		return selected.reshape(self.feature_shape)
+
+	def process_points(self, points: np.ndarray) -> tuple[np.ndarray, np.ndarray]:
+		selected = self.select(self.transform(self.filter(points)))
+		featuremap = self.points_to_featuremap(selected)
+		return selected, featuremap
+
+	def process_frame(self, frame_data: FrameData) -> tuple[np.ndarray, np.ndarray]:
+		return self.process_points(frame_data.points)
 
 
 def parse_frame(frame_bytes: bytes, settings: RadarUARTSettings) -> FrameData | None:
@@ -243,7 +357,7 @@ class RadarUARTCapture:
 		resp = b''
 		while self.cfg_port.in_waiting:
 			resp += self.cfg_port.read(self.cfg_port.in_waiting)
-			time.sleep(0.02)
+			time.sleep(0.1)
 		return resp.decode(errors='ignore').strip()
 
 	def send_config(self) -> None:
@@ -254,7 +368,7 @@ class RadarUARTCapture:
 		self.data_port.reset_output_buffer()
 		self.byte_buffer.clear()
 
-		resp = self._send_cli('sensorStop 0', delay=0.8)
+		resp = self._send_cli('sensorStop 0', delay=1.5)
 		if resp:
 			print('[CLI]', resp)
 
@@ -266,7 +380,7 @@ class RadarUARTCapture:
 				if line.startswith('sensorStop'):
 					continue
 
-				delay = 1.0 if line.startswith('sensorStart') else 0.12
+				delay = 1.5 if line.startswith('sensorStart') else 0.12
 				resp = self._send_cli(line, delay=delay)
 				print(f'  [CFG] {line}')
 				if resp:
@@ -320,7 +434,7 @@ class RadarUARTCapture:
 	def stop_sensor(self) -> None:
 		try:
 			if self.cfg_port and self.cfg_port.is_open:
-				resp = self._send_cli('sensorStop 0', delay=0.8)
+				resp = self._send_cli('sensorStop 0', delay=1.5)
 				if resp:
 					print('[INFO] sensorStop 回應:', resp)
 		except Exception as exc:

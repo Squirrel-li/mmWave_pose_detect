@@ -39,7 +39,7 @@ show_feature.py
 import os, sys, argparse
 import numpy as np
 
-from pointcloud_pyqtgraph import add_axis_guides
+from pointcloud_pyqtgraph import add_floor_plane
 from pointcloud_pyqtgraph import clip_display_points
 from pointcloud_pyqtgraph import range_center
 from pointcloud_pyqtgraph import range_span
@@ -159,7 +159,7 @@ class PointCloudViewer:
         self.title_label.setAlignment(QtCore.Qt.AlignCenter)
         self.title_label.setStyleSheet('font-size: 18px; font-weight: 600; padding: 8px;')
 
-        self.view = self._make_view(gl, QtGui)
+        self.view = self._make_view(gl)
         self.scatter = gl.GLScatterPlotItem(
             pos=np.empty((0, 3), dtype=np.float32),
             color=np.empty((0, 4), dtype=np.float32),
@@ -186,7 +186,7 @@ class PointCloudViewer:
         layout.addWidget(self.slider)
         layout.addWidget(self.status_label)
 
-    def _make_view(self, gl, qt_gui):
+    def _make_view(self, gl):
         x_center = range_center(PC_X)
         y_center = range_center(PC_Y)
         z_center = range_center(PC_Z)
@@ -201,12 +201,7 @@ class PointCloudViewer:
         view.opts['center'].setY(y_center)
         view.opts['center'].setZ(z_center)
 
-        grid = gl.GLGridItem()
-        grid.setSize(x=x_span, y=y_span)
-        grid.setSpacing(x=max(x_span / 8.0, 0.25), y=max(y_span / 8.0, 0.25))
-        grid.translate(x_center, y_center, PC_Z[0])
-        view.addItem(grid)
-        add_axis_guides(view, gl, qt_gui, (PC_X, PC_Y, PC_Z))
+        add_floor_plane(view, gl, (PC_X, PC_Y, PC_Z))
         return view
 
     def _update(self, idx):

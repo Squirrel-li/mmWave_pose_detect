@@ -43,6 +43,16 @@ DEFAULT_RADAR_CONFIG = {
 			'z_max': 1.0,
 		},
 	},
+	'point_transform': {
+		'height_normalization': {
+			'enabled': False,
+			'source_height_m': 1.90,
+			'target_height_m': 1.75,
+			'axes': ['x', 'z'],
+			'floor_z_m': -1.0,
+			'x_center_m': 0.0,
+		},
+	},
 	'feature_map': {
 		'max_points': 64,
 		'dtype': 'float64',

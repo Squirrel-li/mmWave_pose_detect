@@ -5,7 +5,7 @@ radar:
   data_port: COM20
   # cfg_file: IWRL6844_4T4R_MARS_paper_like.cfg
   cfg_file: IWRL6844_4T4R_record_high_accuracy.cfg
-  frames: 200
+  frames: -1
   baudrate_cfg: 115200
   baudrate_data: 1250000
 
@@ -27,17 +27,28 @@ point_output:
   side_info_db_limit: 100.0
 
 point_filter:
-  # MARS keeps out-of-range / ghost points for robustness.
-  # Leave ROI disabled for paper-compatible collection.
+  # Remove points outside this capture ROI before MARS feature-map generation.
   remove_all_zero: true
   roi:
-    enabled: false
+    enabled: true
     x_min: -1.0
     x_max: 1.0
-    y_min: 0.5
-    y_max: 4.0
+    y_min: 0.0
+    y_max: 3.0
     z_min: -1.0
     z_max: 1.0
+
+point_transform:
+  height_normalization:
+    # Scale point-cloud body size from source height to target height.
+    # Default axes keep radar depth/distance (Y) unchanged, while shrinking
+    # left-right width (X) and vertical height (Z).
+    enabled: false
+    source_height_m: 1.90
+    target_height_m: 1.75
+    axes: [x, z]
+    floor_z_m: -1.0
+    x_center_m: 0.0
 
 feature_map:
   # Paper-compatible preprocessing:

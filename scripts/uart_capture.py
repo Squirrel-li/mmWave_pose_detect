@@ -53,12 +53,14 @@ import numpy as np
 from pointcloud_pyqtgraph import init_plot
 from pointcloud_pyqtgraph import process_plot_events
 from pointcloud_pyqtgraph import update_plot_points
-from radar_uart import filter_points
+from radar_uart import MarsFeatureMapProcessor
 from radar_uart import PointFilterSettings
 from radar_uart import point_filter_settings_from_config
+from radar_uart import PointTransformSettings
+from radar_uart import point_transform_settings_from_config
+from radar_uart import parse_transform_axes
 from radar_uart import RadarUARTCapture
 from radar_uart import RadarUARTSettings
-from radar_uart import select_mars_points
 from util.AbsDir import AbsDir
 from util.AbsDir import FileClass
 from util.radar_config import cfg_get
@@ -68,6 +70,7 @@ from util.radar_config import resolve_cfg_path
 
 RADAR_CONFIG = load_radar_config()
 POINT_FILTER_SETTINGS = point_filter_settings_from_config(RADAR_CONFIG)
+POINT_TRANSFORM_SETTINGS = point_transform_settings_from_config(RADAR_CONFIG)
 
 COM_PORT_CONFIG = str(cfg_get(RADAR_CONFIG, 'radar', 'config_port', default='COM3'))
 COM_PORT_DATA = str(cfg_get(RADAR_CONFIG, 'radar', 'data_port', default='COM4'))
@@ -105,6 +108,7 @@ class CaptureSettings:
     snr_norm_std: float = 10.0
     side_info_db_limit: float = 100.0
     point_filter: PointFilterSettings = POINT_FILTER_SETTINGS
+    point_transform: PointTransformSettings = POINT_TRANSFORM_SETTINGS
     max_points: int = 64
     truncate_before_sort: bool = True
     display_ranges: tuple[tuple[float, float], tuple[float, float], tuple[float, float]] = (DISPLAY_X, DISPLAY_Y, DISPLAY_Z)
@@ -143,19 +147,14 @@ def frame_to_featuremap(frame: np.ndarray, max_points: int = 64, truncate_before
 
     ROI 與有效點篩選已由 shared radar_uart.filter_points() 控制。
     """
-    if frame is None or frame.shape[0] == 0:
-        return np.zeros((8, 8, 5), dtype=dtype)
-
-    frame = frame.astype(dtype, copy=False)
-
-    frame = select_mars_points(frame, max_points=max_points, truncate_before_sort=truncate_before_sort)
-
-    # 不足補零。
-    if frame.shape[0] < max_points:
-        pad = np.zeros((max_points - frame.shape[0], 5), dtype=dtype)
-        frame = np.vstack((frame, pad))
-
-    return frame.reshape(8, 8, 5)
+    processor = MarsFeatureMapProcessor(
+        point_filter=PointFilterSettings(remove_all_zero=False),
+        point_transform=PointTransformSettings(),
+        max_points=max_points,
+        truncate_before_sort=truncate_before_sort,
+        dtype=dtype,
+    )
+    return processor.points_to_featuremap(frame)
 
 
 def capture_to_npy(settings: CaptureSettings) -> int:
@@ -166,6 +165,10 @@ def capture_to_npy(settings: CaptureSettings) -> int:
     print(f'[INFO] 輸出檔案: {settings.out_path}')
     print(f'[INFO] intensity_mode: {settings.intensity_mode}')
     print(f'[INFO] filter_roi: {settings.point_filter.roi_enabled}')
+    print(f'[INFO] height_normalization: {settings.point_transform.height_normalize_enabled}')
+    if settings.point_transform.height_normalize_enabled:
+        scale = settings.point_transform.target_height_m / settings.point_transform.source_height_m
+        print(f'[INFO] height_scale: {settings.point_transform.source_height_m:.2f}m -> {settings.point_transform.target_height_m:.2f}m ({scale:.3f}), axes={settings.point_transform.height_axes}, floor_z={settings.point_transform.floor_z_m:.2f}, x_center={settings.point_transform.x_center_m:.2f}')
     print(f'[INFO] show_plot: {settings.show_plot}')
     if settings.show_plot:
         print(f'[INFO] display_ranges: X{settings.display_ranges[0]} Y{settings.display_ranges[1]} Z{settings.display_ranges[2]}')
@@ -173,6 +176,13 @@ def capture_to_npy(settings: CaptureSettings) -> int:
     print(f'[INFO] dtype: {settings.dtype}')
 
     dtype = np.float64 if settings.dtype == 'float64' else np.float32
+    processor = MarsFeatureMapProcessor(
+        point_filter=settings.point_filter,
+        point_transform=settings.point_transform,
+        max_points=settings.max_points,
+        truncate_before_sort=settings.truncate_before_sort,
+        dtype=dtype,
+    )
     fmaps: list[np.ndarray] = []
     capture = None
     plot = None
@@ -213,19 +223,7 @@ def capture_to_npy(settings: CaptureSettings) -> int:
                 continue
 
             frame_count += 1
-            valid_points = filter_points(frame_data.points, settings.point_filter)
-            valid_points = select_mars_points(
-                valid_points,
-                max_points=settings.max_points,
-                truncate_before_sort=settings.truncate_before_sort,
-            )
-            
-            fmap = frame_to_featuremap(
-                valid_points,
-                max_points=settings.max_points,
-                truncate_before_sort=settings.truncate_before_sort,
-                dtype=dtype,
-            )
+            valid_points, fmap = processor.process_frame(frame_data)
             fmaps.append(fmap.astype(dtype, copy=False))
 
             if plot is not None:
@@ -297,6 +295,13 @@ def main() -> int:
     parser.add_argument('--snr_norm_std', type=float, default=SNR_NORM_STD, help='snr_norm 模式使用的 std')
     parser.add_argument('--filter_roi', action='store_true', default=POINT_FILTER_SETTINGS.roi_enabled, help='啟用 ROI 篩選；預設跟 cfg/radar_uart_config.yaml 一致')
     parser.add_argument('--no_filter_roi', action='store_false', dest='filter_roi', help='關閉 ROI 篩選')
+    parser.add_argument('--height_normalize', action='store_true', default=POINT_TRANSFORM_SETTINGS.height_normalize_enabled, help='啟用身高正規化縮放')
+    parser.add_argument('--no_height_normalize', action='store_false', dest='height_normalize', help='關閉身高正規化縮放')
+    parser.add_argument('--source_height_m', type=float, default=POINT_TRANSFORM_SETTINGS.source_height_m, help='身高正規化來源身高，例如 1.90')
+    parser.add_argument('--target_height_m', type=float, default=POINT_TRANSFORM_SETTINGS.target_height_m, help='身高正規化目標身高，例如 1.75')
+    parser.add_argument('--height_axes', default=','.join(POINT_TRANSFORM_SETTINGS.height_axes), help='要縮放的座標軸，例如 x,z 或 z；預設不縮放 y 深度')
+    parser.add_argument('--floor_z_m', type=float, default=POINT_TRANSFORM_SETTINGS.floor_z_m, help='Z 軸縮放錨點；地板高度，縮放時地板不動')
+    parser.add_argument('--x_center_m', type=float, default=POINT_TRANSFORM_SETTINGS.x_center_m, help='X 軸縮放中心線；預設 0.0')
     parser.add_argument('--show_plot', action='store_true', default=True, help='錄製時同步顯示 pyqtgraph 3D 點雲；預設啟用')
     parser.add_argument('--no_show_plot', action='store_false', dest='show_plot', help='錄製時不顯示 3D 點雲')
     parser.add_argument('--plot_hz', type=float, default=10.0, help='3D 點雲顯示更新頻率')
@@ -323,6 +328,14 @@ def main() -> int:
         snr_norm_std=args.snr_norm_std,
         side_info_db_limit=SIDE_INFO_DB_LIMIT,
         point_filter=replace(POINT_FILTER_SETTINGS, roi_enabled=args.filter_roi),
+        point_transform=PointTransformSettings(
+            height_normalize_enabled=args.height_normalize,
+            source_height_m=args.source_height_m,
+            target_height_m=args.target_height_m,
+            height_axes=parse_transform_axes(args.height_axes),
+            floor_z_m=args.floor_z_m,
+            x_center_m=args.x_center_m,
+        ),
         max_points=MAX_POINTS,
         truncate_before_sort=TRUNCATE_BEFORE_SORT,
         display_ranges=(DISPLAY_X, DISPLAY_Y, DISPLAY_Z),

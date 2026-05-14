@@ -62,7 +62,8 @@ class ViewerSettings:
     z_range: Tuple[float, float]
     bins_x: int
     bins_y: int
-    decay: float
+    fade_step: float
+    fade_floor: float
     update_hz: float
     view_mode: str
     value_mode: str
@@ -160,6 +161,14 @@ def add_points_to_heatmap(heatmap: np.ndarray, points: np.ndarray, settings: Vie
     np.maximum.at(heatmap, (y_idx[valid], x_idx[valid]), values[valid])
 
 
+def fade_heatmap(heatmap: np.ndarray, settings: ViewerSettings) -> None:
+    if settings.fade_step > 0.0:
+        np.subtract(heatmap, settings.fade_step, out=heatmap)
+        np.maximum(heatmap, 0.0, out=heatmap)
+    if settings.fade_floor > 0.0:
+        heatmap[heatmap < settings.fade_floor] = 0.0
+
+
 def init_plot(settings: ViewerSettings):
     plt.ion()
     fig, ax = plt.subplots(figsize=(8, 6))
@@ -223,6 +232,8 @@ def run_viewer(settings: ViewerSettings) -> int:
     print(f'[INFO] send_config: {settings.send_config}')
     print(f'[INFO] view_mode: {settings.view_mode}')
     print(f'[INFO] value_mode: {settings.value_mode}')
+    print(f'[INFO] bins: {settings.bins_x}x{settings.bins_y}')
+    print(f'[INFO] fade_step: {settings.fade_step}, fade_floor: {settings.fade_floor}, update_hz: {settings.update_hz}')
     print(f'[INFO] ROI: X{settings.x_range} Y{settings.y_range} Z{settings.z_range}')
 
     uart_settings = RadarUARTSettings(
@@ -261,7 +272,7 @@ def run_viewer(settings: ViewerSettings) -> int:
 
             frame_index += 1
             points = points_in_roi(frame_data.points, settings)
-            heatmap *= settings.decay
+            fade_heatmap(heatmap, settings)
             add_points_to_heatmap(heatmap, points, settings)
 
             now = time.monotonic()
@@ -298,10 +309,11 @@ def main() -> int:
     parser.add_argument('--x_range', default=f'{DEFAULT_DISPLAY_X[0]},{DEFAULT_DISPLAY_X[1]}', help='X range in meters: min,max')
     parser.add_argument('--y_range', default=f'{DEFAULT_DISPLAY_Y[0]},{DEFAULT_DISPLAY_Y[1]}', help='Y/depth range in meters: min,max')
     parser.add_argument('--z_range', default=f'{DEFAULT_DISPLAY_Z[0]},{DEFAULT_DISPLAY_Z[1]}', help='Z range in meters: min,max')
-    parser.add_argument('--bins_x', type=int, default=160, help='Horizontal heatmap bins')
-    parser.add_argument('--bins_y', type=int, default=180, help='Depth heatmap bins')
-    parser.add_argument('--decay', type=float, default=0.90, help='Temporal decay from 0.0 to 1.0')
-    parser.add_argument('--update_hz', type=float, default=12.0, help='Plot refresh rate')
+    parser.add_argument('--bins_x', type=int, default=120, help='Horizontal heatmap bins')
+    parser.add_argument('--bins_y', type=int, default=120, help='Depth/height heatmap bins')
+    parser.add_argument('--fade_step', type=float, default=0.35, help='Subtract this value from every heatmap cell each frame; higher values shorten point trails')
+    parser.add_argument('--fade_floor', type=float, default=0.05, help='Clear heatmap cells below this value after fading to reduce render load')
+    parser.add_argument('--update_hz', type=float, default=8.0, help='Plot refresh rate')
     parser.add_argument(
         '--view',
         choices=['topdown', 'front'],
@@ -333,8 +345,11 @@ def main() -> int:
     if args.bins_x <= 0 or args.bins_y <= 0:
         print('[ERROR] bins_x and bins_y must be positive.')
         return 1
-    if not 0.0 <= args.decay <= 1.0:
-        print('[ERROR] decay must be between 0.0 and 1.0.')
+    if args.fade_step < 0.0:
+        print('[ERROR] fade_step must be non-negative.')
+        return 1
+    if args.fade_floor < 0.0:
+        print('[ERROR] fade_floor must be non-negative.')
         return 1
 
     settings = ViewerSettings(
@@ -350,7 +365,8 @@ def main() -> int:
         z_range=parse_range(args.z_range, 'z'),
         bins_x=args.bins_x,
         bins_y=args.bins_y,
-        decay=args.decay,
+        fade_step=args.fade_step,
+        fade_floor=args.fade_floor,
         update_hz=args.update_hz,
         view_mode=args.view,
         value_mode=args.value_mode,
